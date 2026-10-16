@@ -5,10 +5,13 @@ const { readFile } = require("node:fs/promises");
 const path = require("node:path");
 const vscode = require("vscode");
 const { loadArchivedSessionIds, watchArchivedSessions } = require("./session-archive");
+const { SessionStatusReader, watchSessionStatus } = require("./session-status");
+const { LiveSessionStatus } = require("./session-live-status");
 const {
   getSessionIndexPath,
   getSessionsDirectory,
   isPathInsideWorkspace,
+  loadSessionFiles,
   loadSessionWorkspaces,
   parseSessionIndex,
 } = require("./session-index");
@@ -28,16 +31,33 @@ const CODEX_NEW_PANEL_PATH = "/extension/panel/new";
 let panelSequence = 0;
 let openQueue = Promise.resolve();
 
+const SESSION_STATUSES = {
+  working: { icon: "loading~spin", label: "Working (live)" },
+  waiting: { icon: "bell", label: "Waiting for input or approval (live)" },
+  idle: { icon: "circle-outline", label: "Idle (live)" },
+  unconfirmed: { icon: "clock", label: "Activity unconfirmed" },
+  completed: { icon: "pass", label: "Completed" },
+  interrupted: { icon: "debug-stop", label: "Interrupted" },
+  failed: { icon: "error", label: "Failed" },
+};
+
 class CodexChatItem extends vscode.TreeItem {
   constructor(session) {
     super(session.title, vscode.TreeItemCollapsibleState.None);
 
     this.id = session.id;
+    const status = session.showStatusIcons
+      ? SESSION_STATUSES[session.status] ?? { icon: "question", label: "Status unknown" }
+      : undefined;
     this.description = [session.workspaceName, formatUpdatedAt(session.updatedAt)]
       .filter(Boolean)
       .join(" · ");
     this.tooltip = [
       session.title,
+      status ? `Status: ${status.label}` : undefined,
+      session.status === "unconfirmed" && status
+        ? "Live status is unavailable. An unfinished log does not confirm the task is still running."
+        : undefined,
       session.workspacePath ? `Workspace: ${session.workspacePath}` : undefined,
       session.updatedAt
         ? `Updated: ${new Date(session.updatedAt).toLocaleString()}`
@@ -45,7 +65,7 @@ class CodexChatItem extends vscode.TreeItem {
     ]
       .filter(Boolean)
       .join("\n");
-    this.iconPath = new vscode.ThemeIcon("comment-discussion");
+    this.iconPath = new vscode.ThemeIcon(status?.icon ?? "comment-discussion");
     this.contextValue = "codexChat";
     this.command = {
       command: OPEN_CHAT_COMMAND_ID,
@@ -53,7 +73,7 @@ class CodexChatItem extends vscode.TreeItem {
       arguments: [session.id],
     };
     this.accessibilityInformation = {
-      label: `${session.title}, Codex chat`,
+      label: `${session.title}, Codex chat${status ? `, ${status.label}` : ""}`,
     };
   }
 }
@@ -84,6 +104,8 @@ class CodexChatHistoryProvider {
     this.archiveDirectory = path.join(path.dirname(sessionIndexPath), "archived_sessions");
     this.getWorkspaceFolders = getWorkspaceFolders;
     this.workspaceBySessionId = new Map();
+    this.showStatusIcons = false;
+    this.sessionStatusReader = new SessionStatusReader();
     this.changeEmitter = new vscode.EventEmitter();
     this.statusEmitter = new vscode.EventEmitter();
     this.onDidChangeTreeData = this.changeEmitter.event;
@@ -116,9 +138,15 @@ class CodexChatHistoryProvider {
       const missingWorkspaceIds = sessions
         .filter((session) => !this.workspaceBySessionId.has(session.id))
         .map((session) => session.id);
+      const showStatusIcons = this.showStatusIcons;
+      this.liveStatus?.setThreads(sessions.map(({ id }) => id));
+      const sessionFiles = showStatusIcons
+        ? await loadSessionFiles(this.sessionsDirectory, sessions.map(({ id }) => id))
+        : undefined;
       const loadedWorkspaces = await loadSessionWorkspaces(
         this.sessionsDirectory,
         missingWorkspaceIds,
+        sessionFiles,
       );
 
       for (const [sessionId, workspacePath] of loadedWorkspaces) {
@@ -126,10 +154,21 @@ class CodexChatHistoryProvider {
       }
 
       const workspaceFolders = this.getWorkspaceFolders();
-      const enrichedSessions = sessions.map((session) => ({
-        ...session,
-        workspacePath: this.workspaceBySessionId.get(session.id),
+      const enrichedSessions = await Promise.all(sessions.map(async (session) => {
+        const historicalStatus = sessionFiles?.has(session.id)
+          ? await this.sessionStatusReader.read(sessionFiles.get(session.id))
+          : undefined;
+        const liveStatus = this.liveStatus?.get(session.id);
+        return {
+          ...session,
+          workspacePath: this.workspaceBySessionId.get(session.id),
+          showStatusIcons,
+          status: liveStatus && liveStatus !== "idle" ? liveStatus
+            : liveStatus === "idle" && historicalStatus === "unconfirmed" ? "idle"
+            : historicalStatus ?? liveStatus,
+        };
       }));
+      if (sessionFiles) this.sessionStatusReader.retain(sessionFiles.values());
 
       this.statusEmitter.fire(undefined);
       return createChatGroups(enrichedSessions, workspaceFolders);
@@ -145,6 +184,7 @@ class CodexChatHistoryProvider {
   }
 
   dispose() {
+    this.sessionStatusReader.clear();
     this.changeEmitter.dispose();
     this.statusEmitter.dispose();
   }
@@ -382,6 +422,30 @@ function activate(context) {
   const workspaceSubscription = vscode.workspace.onDidChangeWorkspaceFolders(
     () => historyProvider.refresh(),
   );
+  let sessionStatusWatcher;
+  const updateStatusIcons = () => {
+    const enabled = vscode.workspace.getConfiguration("codexExtras")
+      .get("showSessionStatusIcons", false);
+    sessionStatusWatcher?.dispose();
+    historyProvider.liveStatus?.dispose();
+    historyProvider.liveStatus = undefined;
+    sessionStatusWatcher = undefined;
+    historyProvider.showStatusIcons = enabled;
+    historyProvider.sessionStatusReader.clear();
+    if (enabled) {
+      historyProvider.liveStatus = new LiveSessionStatus({
+        codexHome: path.dirname(sessionIndexPath), onChange: () => historyProvider.refresh(),
+      });
+      sessionStatusWatcher = watchSessionStatus(
+        historyProvider.sessionsDirectory, () => historyProvider.refresh(), vscode,
+      );
+    }
+    historyProvider.refresh();
+  };
+  const configurationSubscription = vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration("codexExtras.showSessionStatusIcons")) updateStatusIcons();
+  });
+  updateStatusIcons();
 
   context.subscriptions.push(
     vscode.commands.registerCommand(COMMAND_ID, openNewChat),
@@ -395,6 +459,11 @@ function activate(context) {
     statusSubscription,
     visibilitySubscription,
     workspaceSubscription,
+    configurationSubscription,
+    { dispose() {
+      sessionStatusWatcher?.dispose();
+      historyProvider.liveStatus?.dispose();
+    } },
     watchSessionIndex(sessionIndexPath, () => historyProvider.refresh()),
     watchArchivedSessions(historyProvider.archiveDirectory, () => historyProvider.refresh(), vscode),
   );
