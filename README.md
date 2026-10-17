@@ -57,7 +57,17 @@ extension and cannot be renamed by Extras through the VS Code API.
 | Setting | Default | Description |
 | --- | --- | --- |
 | `codexExtras.showNewAgentButton` | `true` | Shows the New Codex Agent button in the editor toolbar. |
+| `codexExtras.chatSortOrder` | `recent` | `recent`: session-index date; `activeFirst`: input waits/questions, working agents, unread results, then other chats by activity or successful opening. Workspace groups are preserved. |
 | `codexExtras.showSessionStatusIcons` | `false` | Experimental: replaces conversation icons with live task status and recorded completion events. |
+
+Set **Codex Extras: Chat Sort Order** to **activeFirst** to bring active work and
+new results to the top of each workspace group. Within each priority, use the
+latest index date, recorded lifecycle event, observed status change, or successful
+open through Extras. Opening history is saved locally across reloads. Streamed
+tokens and log modification times do not affect ordering. Switching back to
+**recent** restores the original index-date ordering immediately.
+Active-first sorting uses experimental status observation even when status icons
+are hidden; it does not identify which conversation is inside a generic new tab.
 
 Enable **Codex Extras: Show Session Status Icons** for a spinner while working,
 a green check mark for a new result to review, a stop icon for interrupted turns,
@@ -96,7 +106,7 @@ The IPC adapter is experimental and was checked against Codex extension
 `26.1007.21434` (stream protocol version 11). An incompatible protocol falls back
 to unknown/unconfirmed status. This is an observer only: it does not start,
 resume, interrupt, or take ownership of tasks. See [status implementation notes](docs/SESSION-STATUS.md).
-When disabled, session bodies are not read, no status watcher is registered,
+When icons are disabled and sorting is **recent**, session bodies are not read, no status watcher is registered,
 and no IPC connection is opened.
 
 ## Install

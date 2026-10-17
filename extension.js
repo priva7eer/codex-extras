@@ -7,6 +7,7 @@ const vscode = require("vscode");
 const { loadArchivedSessionIds, watchArchivedSessions } = require("./session-archive");
 const { SessionStatusReader, watchSessionStatus } = require("./session-status");
 const { LiveSessionStatus } = require("./session-live-status");
+const { sortSessions } = require("./session-sort");
 const {
   getSessionIndexPath,
   getSessionsDirectory,
@@ -28,6 +29,7 @@ const CODEX_NEW_PANEL_SCHEME = "openai-codex";
 const CODEX_ROUTE_AUTHORITY = "route";
 const CODEX_NEW_PANEL_PATH = "/extension/panel/new";
 const REVIEWED_RESULTS_KEY = "codexExtras.reviewedResults";
+const LAST_OPENED_KEY = "codexExtras.lastOpened";
 const NEUTRAL_STATUS_ICON = {
   light: path.join(__dirname, "assets", "status-neutral.svg"),
   dark: path.join(__dirname, "assets", "status-neutral.svg"),
@@ -112,12 +114,15 @@ class CodexChatGroupItem extends vscode.TreeItem {
 }
 
 class CodexChatHistoryProvider {
-  constructor(sessionIndexPath, sessionsDirectory, getWorkspaceFolders, getReviewedResults) {
+  constructor(sessionIndexPath, sessionsDirectory, getWorkspaceFolders, getReviewedResults, getLastOpened) {
     this.sessionIndexPath = sessionIndexPath;
     this.sessionsDirectory = sessionsDirectory;
     this.archiveDirectory = path.join(path.dirname(sessionIndexPath), "archived_sessions");
     this.getWorkspaceFolders = getWorkspaceFolders;
     this.getReviewedResults = getReviewedResults;
+    this.getLastOpened = getLastOpened;
+    this.activityStates = new Map();
+    this.sortOrder = "recent";
     this.displayedResults = new Map();
     this.workspaceBySessionId = new Map();
     this.showStatusIcons = false;
@@ -169,8 +174,9 @@ class CodexChatHistoryProvider {
         .filter((session) => !this.workspaceBySessionId.has(session.id))
         .map((session) => session.id);
       const showStatusIcons = this.showStatusIcons;
+      const needsStatus = showStatusIcons || this.sortOrder === "activeFirst";
       this.liveStatus?.setThreads(sessions.map(({ id }) => id));
-      const sessionFiles = showStatusIcons
+      const sessionFiles = needsStatus
         ? await loadSessionFiles(this.sessionsDirectory, sessions.map(({ id }) => id))
         : undefined;
       const loadedWorkspaces = await loadSessionWorkspaces(
@@ -197,20 +203,36 @@ class CodexChatHistoryProvider {
         if (status === "completed" && resultKey === this.getReviewedResults()[session.id]) {
           status = "reviewed";
         }
+        const previous = this.activityStates.get(session.id);
+        const changed = previous && (previous.status !== status || previous.resultKey !== resultKey);
+        const meaningful = ["waiting", "question", "working", "completed", "interrupted", "failed"].includes(status);
+        const changedAt = changed && meaningful ? Date.now() : previous?.changedAt ?? 0;
+        this.activityStates.set(session.id, { status, resultKey, changedAt });
+        const activityAt = Math.max(
+          this.getLastOpened()[session.id] ?? 0,
+          sessionFiles ? this.sessionStatusReader.activityTime(sessionFiles.get(session.id)) ?? 0 : 0,
+          changedAt,
+        );
         return {
           ...session,
           workspacePath: this.workspaceBySessionId.get(session.id),
           showStatusIcons,
           status,
           resultKey,
+          activityAt,
         };
       }));
       this.displayedResults = new Map(enrichedSessions.map((session) => [
         session.id, session.status === "completed" ? session.resultKey : undefined,
       ]));
       if (sessionFiles) this.sessionStatusReader.retain(sessionFiles.values());
+      const retainedIds = new Set(sessions.map((session) => session.id));
+      for (const id of this.activityStates.keys()) {
+        if (!retainedIds.has(id)) this.activityStates.delete(id);
+      }
 
-      this.groups = createChatGroups(enrichedSessions, workspaceFolders);
+      // Sort before partitioning: each workspace group retains this ordering.
+      this.groups = createChatGroups(sortSessions(enrichedSessions, this.sortOrder), workspaceFolders);
       this.statusEmitter.fire(undefined);
       return this.groups;
     } catch (error) {
@@ -438,6 +460,7 @@ function watchSessionIndex(sessionIndexPath, onChange) {
  */
 function activate(context) {
   let reviewedResults = context.globalState.get(REVIEWED_RESULTS_KEY, {});
+  let lastOpened = context.globalState.get(LAST_OPENED_KEY, {});
   let reviewQueue = Promise.resolve();
   const openNewChat = () => {
     openQueue = openQueue.catch(() => undefined).then(openNewCodexAgent);
@@ -449,6 +472,7 @@ function activate(context) {
     getSessionsDirectory(),
     () => vscode.workspace.workspaceFolders ?? [],
     () => reviewedResults,
+    () => lastOpened,
   );
   const openChat = async (session) => {
     const id = typeof session === "string" ? session : session?.sessionId ?? session?.id;
@@ -457,15 +481,20 @@ function activate(context) {
     const resultKey = session && typeof session === "object" && "resultKey" in session
       ? session.resultKey : historyProvider.displayedResults.get(id);
     await openCodexChat(session);
-    if (!resultKey || !vscode.window.tabGroups.all.some((group) => group.tabs.some((tab) => {
+    if (!vscode.window.tabGroups.all.some((group) => group.tabs.some((tab) => {
       const uri = tab.input?.uri;
       return uri?.scheme === CODEX_NEW_PANEL_SCHEME && uri.authority === CODEX_ROUTE_AUTHORITY &&
         uri.path === `/local/${id}`;
     }))) return;
     reviewQueue = reviewQueue.catch(() => {}).then(async () => {
-      const next = { ...reviewedResults, [id]: resultKey };
-      await context.globalState.update(REVIEWED_RESULTS_KEY, next);
-      reviewedResults = next;
+      const nextOpened = { ...lastOpened, [id]: Date.now() };
+      await context.globalState.update(LAST_OPENED_KEY, nextOpened);
+      lastOpened = nextOpened;
+      if (resultKey) {
+        const next = { ...reviewedResults, [id]: resultKey };
+        await context.globalState.update(REVIEWED_RESULTS_KEY, next);
+        reviewedResults = next;
+      }
       historyProvider.refresh();
     });
     await reviewQueue;
@@ -530,15 +559,20 @@ function activate(context) {
   );
   let sessionStatusWatcher;
   const updateStatusIcons = () => {
-    const enabled = vscode.workspace.getConfiguration("codexExtras")
-      .get("showSessionStatusIcons", false);
-    sessionStatusWatcher?.dispose();
-    historyProvider.liveStatus?.dispose();
-    historyProvider.liveStatus = undefined;
-    sessionStatusWatcher = undefined;
+    const configuration = vscode.workspace.getConfiguration("codexExtras");
+    const enabled = configuration.get("showSessionStatusIcons", false);
+    const order = configuration.get("chatSortOrder", "recent");
+    historyProvider.sortOrder = order === "activeFirst" ? order : "recent";
     historyProvider.showStatusIcons = enabled;
-    historyProvider.sessionStatusReader.clear();
-    if (enabled) {
+    const needsStatus = enabled || historyProvider.sortOrder === "activeFirst";
+    if (!needsStatus) {
+      sessionStatusWatcher?.dispose();
+      historyProvider.liveStatus?.dispose();
+      historyProvider.liveStatus = undefined;
+      sessionStatusWatcher = undefined;
+      historyProvider.sessionStatusReader.clear();
+      historyProvider.activityStates.clear();
+    } else if (!historyProvider.liveStatus) {
       historyProvider.liveStatus = new LiveSessionStatus({
         codexHome: path.dirname(sessionIndexPath), onChange: () => historyProvider.refresh(),
       });
@@ -549,7 +583,8 @@ function activate(context) {
     historyProvider.refresh();
   };
   const configurationSubscription = vscode.workspace.onDidChangeConfiguration((event) => {
-    if (event.affectsConfiguration("codexExtras.showSessionStatusIcons")) updateStatusIcons();
+    if (event.affectsConfiguration("codexExtras.showSessionStatusIcons") ||
+        event.affectsConfiguration("codexExtras.chatSortOrder")) updateStatusIcons();
   });
   updateStatusIcons();
   activeTabChanged();

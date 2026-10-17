@@ -113,6 +113,7 @@ function createHarness(t, tabs = [], options = {}) {
   const tabGroupsChanged = new EventEmitter();
   const tabGroup = { tabs, activeTab: options.activeTab };
   let showStatusIcons = options.showSessionStatusIcons ?? false;
+  let chatSortOrder = options.chatSortOrder ?? "recent";
   const fileWatchers = [];
   const liveMonitors = [];
   class LiveStatus {
@@ -176,7 +177,8 @@ function createHarness(t, tabs = [], options = {}) {
     workspace: {
       getConfiguration(section) {
         assert.equal(section, "codexExtras");
-        return { get: (key, fallback) => key === "showSessionStatusIcons" ? showStatusIcons : fallback };
+        return { get: (key, fallback) => key === "showSessionStatusIcons" ? showStatusIcons
+          : key === "chatSortOrder" ? chatSortOrder : fallback };
       },
       onDidChangeConfiguration: configurationChanged.event,
       createFileSystemWatcher(pattern) {
@@ -308,6 +310,10 @@ function createHarness(t, tabs = [], options = {}) {
       configurationChanged.fire({
         affectsConfiguration: (key) => key === "codexExtras.showSessionStatusIcons",
       });
+    },
+    setSortOrder(value) {
+      chatSortOrder = value;
+      configurationChanged.fire({ affectsConfiguration: (key) => key === "codexExtras.chatSortOrder" });
     },
     runCommand: (command = "codexExtras.newCodexAgent", ...args) =>
       commandHandlers.get(command)(...args),
@@ -652,6 +658,60 @@ test("status icons are opt-in, update on live events, and toggle without reloadi
   assert.equal(provider.sessionStatusReader.cache.size, 0);
 });
 
+test("active-first sorting stays within workspace groups and works with hidden status icons", async (t) => {
+  const codexHome = await mkdtemp(path.join(os.tmpdir(), "codex-extras-sort-"));
+  t.after(() => rm(codexHome, { recursive: true, force: true }));
+  const ids = Array.from({ length: 6 }, (_, index) => `019f9c23-f7ec-72c3-8eb6-0018b17bea4${index}`);
+  const sessions = path.join(codexHome, "sessions");
+  await mkdir(sessions);
+  await writeFile(path.join(codexHome, "session_index.jsonl"), ids.map((id, index) => JSON.stringify({
+    id, thread_name: `Chat ${index}`, updated_at: `2026-01-0${6 - index}T00:00:00Z`,
+  })).join("\n"));
+  for (const [index, id] of ids.entries()) {
+    const meta = JSON.stringify({ type: "session_meta", payload: { cwd: index < 4 ? "/projects/current" : "/projects/other" } });
+    const complete = index === 1 ? "\n" + JSON.stringify({ type: "event_msg", timestamp: "2026-02-01T12:00:00Z", payload: { type: "task_complete", turn_id: "result" } }) : "";
+    await writeFile(path.join(sessions, `rollout-${id}.jsonl`), meta + complete + "\n");
+  }
+  const storedState = new Map();
+  const harness = createHarness(t, [], { codexHome, storedState,
+    workspaceFolders: [{ name: "current", uri: { fsPath: "/projects/current" } }],
+  });
+  const provider = harness.treeViews[0].options.treeDataProvider;
+  assert.equal(harness.liveMonitors.length, 0, "default sorting must not connect to IPC");
+  harness.setSortOrder("activeFirst");
+  const live = harness.liveMonitors.at(-1);
+  ids.forEach((id) => live.states.set(id, "idle"));
+  live.states.set(ids[2], "working");
+  live.states.set(ids[3], "question");
+  live.states.set(ids[4], "working");
+  live.states.set(ids[5], "waiting");
+  let groups = await provider.getChildren();
+  assert.deepEqual(groups.map((group) => group.label), ["Current Workspace", "Other Workspaces"]);
+  assert.deepEqual(groups[0].sessions.map((session) => session.id), [ids[3], ids[2], ids[1], ids[0]]);
+  assert.deepEqual(groups[1].sessions.map((session) => session.id), [ids[5], ids[4]]);
+  assert.ok((await provider.getChildren(groups[0])).every((row) => row.iconPath.id === "comment-discussion"));
+  const firstOrder = groups[0].sessions.map((session) => session.id);
+  await appendFile(path.join(sessions, `rollout-${ids[0]}.jsonl`), JSON.stringify({ type: "response_item", text: "streamed token" }) + "\n");
+  groups = await provider.getChildren();
+  assert.deepEqual(groups[0].sessions.map((session) => session.id), firstOrder, "tokens must not reorder peers");
+  await harness.runCommand("codexExtras.openChat", ids[1]);
+  groups = await provider.getChildren();
+  assert.equal(groups[0].sessions.find((session) => session.id === ids[1]).status, "reviewed");
+  assert.ok(storedState.get("codexExtras.lastOpened")[ids[1]] > 0);
+  harness.setStatusIcons(true);
+  harness.setStatusIcons(false);
+  assert.equal(harness.liveMonitors.length, 1, "hiding icons must keep sorting's observer connected");
+  assert.ok(!live.disposed);
+  harness.setSortOrder("recent");
+  groups = await provider.getChildren();
+  assert.deepEqual(groups[0].sessions.map((session) => session.id), ids.slice(0, 4));
+  assert.ok(live.disposed);
+  const reloaded = createHarness(t, [], { codexHome, storedState, chatSortOrder: "activeFirst", workspaceFolders: [] });
+  const reloadedProvider = reloaded.treeViews[0].options.treeDataProvider;
+  await reloadedProvider.getChildren();
+  assert.ok(reloadedProvider.groups[0].sessions.find((session) => session.id === ids[1]).activityAt >= storedState.get("codexExtras.lastOpened")[ids[1]]);
+});
+
 async function resultFixture(t) {
   const codexHome = await mkdtemp(path.join(os.tmpdir(), "codex-extras-reviewed-"));
   t.after(() => rm(codexHome, { recursive: true, force: true }));
@@ -700,6 +760,7 @@ test("a failed open or missing editor tab cannot consume a result", async (t) =>
   await item(noTab);
   await noTab.runCommand("codexExtras.openChat", id);
   assert.equal((await item(noTab)).iconPath.id, "pass");
+  assert.equal(noTab.storedState.has("codexExtras.lastOpened"), false);
 });
 
 test("opening an old result never consumes a newer turn that finishes during opening", async (t) => {

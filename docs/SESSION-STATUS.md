@@ -2,6 +2,20 @@
 
 `codexExtras.showSessionStatusIcons` is off by default. The original chat icon,
 metadata-only reads, and watcher behavior remain the default.
+`codexExtras.chatSortOrder: activeFirst` also enables the status observer,
+independently of whether icons are shown.
+
+## Sorting
+
+`recent` preserves session-index order. `activeFirst` orders sessions within
+their existing workspace groups by waiting/questions, working, unread completed
+results, then other states. Peers use the maximum of index date, explicit lifecycle
+timestamp, observed meaningful status transition, and successful Extras open time.
+Only open times persist in `globalState` (`codexExtras.lastOpened`); observed
+transitions are in memory. Initial observations do not invent a transition time.
+Repeated token output and log modification timestamps never affect ordering.
+Failed opens or missing tabs do not update opening history. Disabling both
+status-dependent options closes the observer and disposes status watchers.
 
 ## Sources of status
 
