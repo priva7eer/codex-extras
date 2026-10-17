@@ -33,7 +33,9 @@ function parseSessionStatus(contents, startOffset = 0, previous) {
     if (status !== "working" && result?.status === "working" &&
         turnId && result.turnId && turnId !== result.turnId) continue;
     const timestamp = typeof event.timestamp === "string" ? Date.parse(event.timestamp) : NaN;
-    result = { status, turnId, offset: eventOffset, timestamp: Number.isFinite(timestamp) ? timestamp : undefined };
+    const completedAt = status === "completed" && Number.isFinite(timestamp)
+      ? Math.max(result?.completedAt ?? 0, timestamp) : result?.completedAt;
+    result = { status, turnId, offset: eventOffset, completedAt };
   }
   return result;
 }
@@ -93,8 +95,8 @@ class SessionStatusReader {
     return JSON.stringify([filePath, entry.event.turnId ?? entry.event.offset]);
   }
 
-  activityTime(filePath) {
-    return this.cache.get(filePath)?.event?.timestamp;
+  completionTime(filePath) {
+    return this.cache.get(filePath)?.event?.completedAt;
   }
 
   clear() {

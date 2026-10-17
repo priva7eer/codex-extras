@@ -112,10 +112,10 @@
       "properties": {
         "codexExtras.chatSortOrder": {
           "type": "string",
-          "enum": ["recent", "activeFirst"],
-          "enumDescriptions": ["Newest session-index update first.", "Input waits and questions, working agents, new results, then other chats by recent activity or successful opening."],
+          "enum": ["recent", "latestResult"],
+          "enumDescriptions": ["Newest session-index update first.", "Most recently delivered result first. Opening, focus, read state, and live activity do not change the order."],
           "default": "recent",
-          "description": "Sort chats within each workspace group. Active first uses experimental live Codex status and bounded log reads even when status icons are hidden."
+          "description": "Sort chats within each workspace group. Latest result uses bounded log reads and locally remembered completion times, independently of status icons."
         },
         "codexExtras.showSessionStatusIcons": {
           "type": "boolean",

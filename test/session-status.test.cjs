@@ -27,7 +27,7 @@ test("does not infer completion from messages, tool output, or partial JSONL", (
   assert.equal(parseSessionStatus(event("task_started") + event("task_complete").trimEnd()).status, "working");
 });
 
-test("activity time comes only from explicit lifecycle records, not streaming messages", async (t) => {
+test("completion time survives starts, interruption, and streaming without inventing a result", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "codex-extras-activity-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const filePath = path.join(root, "session.jsonl");
@@ -35,10 +35,13 @@ test("activity time comes only from explicit lifecycle records, not streaming me
   const timestamp = "2026-01-01T12:00:00Z";
   await writeFile(filePath, JSON.stringify({ timestamp, type: "event_msg", payload: { type: "task_complete" } }) + "\n");
   await reader.read(filePath);
-  assert.equal(reader.activityTime(filePath), Date.parse(timestamp));
+  assert.equal(reader.completionTime(filePath), Date.parse(timestamp));
   await appendFile(filePath, JSON.stringify({ timestamp: "2026-01-02T12:00:00Z", type: "response_item" }) + "\n");
   await reader.read(filePath);
-  assert.equal(reader.activityTime(filePath), Date.parse(timestamp));
+  assert.equal(reader.completionTime(filePath), Date.parse(timestamp));
+  await appendFile(filePath, event("task_started", "next") + event("turn_aborted", "next"));
+  await reader.read(filePath);
+  assert.equal(reader.completionTime(filePath), Date.parse(timestamp));
 });
 
 test("reads bounded tails, retains status while growing, resets on truncation and deletion", async (t) => {

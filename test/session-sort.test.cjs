@@ -1,23 +1,24 @@
 "use strict";
-
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { sortSessions } = require("../session-sort");
-const chat = (id, status, activityAt = 0) => ({ id, title: id, status, activityAt });
 
-test("active-first prioritizes attention, working agents, unread results, and other chats", () => {
-  const input = [chat("idle", "idle", 100), chat("result", "completed", 80), chat("work", "working", 60),
-    chat("question", "question", 40), chat("approval", "waiting", 50), chat("reviewed", "reviewed", 90)];
-  const original = [...input];
-  assert.deepEqual(sortSessions(input, "activeFirst").map((session) => session.id),
-    ["approval", "question", "work", "result", "idle", "reviewed"]);
-  assert.deepEqual(input, original, "sorting must not mutate the source list");
+test("latest results stay ordered by delivery time regardless of status, read state, or focus", () => {
+  const input = [
+    { id: "old", completedAt: 100, status: "working", activityAt: Date.now() },
+    { id: "new", completedAt: 300, status: "reviewed" },
+    { id: "middle", completedAt: 200, status: "question" },
+    { id: "unconfirmed", updatedAt: "2099-01-01T00:00:00Z" },
+  ];
+  assert.deepEqual(sortSessions(input, "latestResult").map(({ id }) => id), ["new", "middle", "old", "unconfirmed"]);
+  assert.equal(input[0].id, "old", "sorting must not mutate the source list");
+  assert.equal(sortSessions(input, "recent"), input);
 });
 
-test("activity timestamps order peers with index-date and deterministic title fallbacks", () => {
-  const input = [chat("B", "reviewed"), chat("A", "idle"), chat("opened", "reviewed", 300),
-    { ...chat("indexed", "idle"), updatedAt: "2026-01-01T00:00:00Z" }];
-  assert.deepEqual(sortSessions(input, "activeFirst").map((session) => session.id), ["indexed", "opened", "A", "B"]);
-  assert.equal(sortSessions(input, "recent"), input, "recent mode preserves existing index ordering");
-  assert.equal(sortSessions(input, "unsupported"), input);
+test("missing or equal result timestamps have a stable identity order", () => {
+  const input = [{ id: "A" }, { id: "B" }];
+  assert.deepEqual(sortSessions(input, "latestResult").map(({ id }) => id), ["B", "A"]);
+  input[0].title = "A changed title";
+  input[0].updatedAt = "2099-01-01T00:00:00Z";
+  assert.deepEqual(sortSessions(input, "latestResult").map(({ id }) => id), ["B", "A"]);
 });

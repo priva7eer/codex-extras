@@ -25,7 +25,7 @@ assert.ok(
   manifest.activationEvents.includes("onCommand:codexExtras.newCodexAgent"),
 );
 assert.equal(manifest.contributes.configuration.properties["codexExtras.chatSortOrder"].default, "recent");
-assert.deepEqual(manifest.contributes.configuration.properties["codexExtras.chatSortOrder"].enum, ["recent", "activeFirst"]);
+assert.deepEqual(manifest.contributes.configuration.properties["codexExtras.chatSortOrder"].enum, ["recent", "latestResult"]);
 assert.ok(
   manifest.activationEvents.includes("onView:codexExtras.chatHistory"),
 );

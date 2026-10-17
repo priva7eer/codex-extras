@@ -4,10 +4,10 @@ All notable changes to Codex Extras are documented in this file.
 
 ## Unreleased
 
-- Add opt-in active-first sorting within existing workspace groups. Prioritize
-  input waits/questions, working agents, and unread results; use lifecycle and
-  successful-open recency without reordering on streamed tokens. Keep recent
-  index-date sorting as the default, independently of icon visibility.
+- Add opt-in latest-result sorting within workspace groups. Only a new completed
+  result changes recency; clicks, focus, read state, work starts, questions, and
+  streaming cannot reorder chats. Persist known completion times across reloads
+  and keep index-date sorting as the default.
 
 - Synchronize chat selection with the active conversation tab across editor
   groups without stealing focus. Clear stale selections for unresolved new

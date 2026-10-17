@@ -57,17 +57,18 @@ extension and cannot be renamed by Extras through the VS Code API.
 | Setting | Default | Description |
 | --- | --- | --- |
 | `codexExtras.showNewAgentButton` | `true` | Shows the New Codex Agent button in the editor toolbar. |
-| `codexExtras.chatSortOrder` | `recent` | `recent`: session-index date; `activeFirst`: input waits/questions, working agents, unread results, then other chats by activity or successful opening. Workspace groups are preserved. |
+| `codexExtras.chatSortOrder` | `recent` | `recent`: session-index date; `latestResult`: most recently delivered result first, within each workspace group. |
 | `codexExtras.showSessionStatusIcons` | `false` | Experimental: replaces conversation icons with live task status and recorded completion events. |
 
-Set **Codex Extras: Chat Sort Order** to **activeFirst** to bring active work and
-new results to the top of each workspace group. Within each priority, use the
-latest index date, recorded lifecycle event, observed status change, or successful
-open through Extras. Opening history is saved locally across reloads. Streamed
-tokens and log modification times do not affect ordering. Switching back to
+Set **Codex Extras: Chat Sort Order** to **latestResult** to order each workspace
+by the time its sessions last delivered a completed result. Opening a chat,
+changing focus, reading a result, starting work, questions, and streamed tokens
+do not change the order. A new completed result moves that chat up within its
+workspace group. Remembered completion times survive reloads. Chats with no known
+result time appear below dated results in a stable order. Switching back to
 **recent** restores the original index-date ordering immediately.
-Active-first sorting uses experimental status observation even when status icons
-are hidden; it does not identify which conversation is inside a generic new tab.
+This option reads bounded log tails, independently of status icons; it does not
+require a live IPC connection when icons are hidden.
 
 Enable **Codex Extras: Show Session Status Icons** for a spinner while working,
 a green check mark for a new result to review, a stop icon for interrupted turns,

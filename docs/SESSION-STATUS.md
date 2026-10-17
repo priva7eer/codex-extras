@@ -2,20 +2,21 @@
 
 `codexExtras.showSessionStatusIcons` is off by default. The original chat icon,
 metadata-only reads, and watcher behavior remain the default.
-`codexExtras.chatSortOrder: activeFirst` also enables the status observer,
-independently of whether icons are shown.
-
 ## Sorting
 
-`recent` preserves session-index order. `activeFirst` orders sessions within
-their existing workspace groups by waiting/questions, working, unread completed
-results, then other states. Peers use the maximum of index date, explicit lifecycle
-timestamp, observed meaningful status transition, and successful Extras open time.
-Only open times persist in `globalState` (`codexExtras.lastOpened`); observed
-transitions are in memory. Initial observations do not invent a transition time.
-Repeated token output and log modification timestamps never affect ordering.
-Failed opens or missing tabs do not update opening history. Disabling both
-status-dependent options closes the observer and disposes status watchers.
+`recent` preserves session-index order. `latestResult` sorts completed result
+timestamps descending within the existing workspace groups. Opening, focusing,
+reading, starting work, live status transitions, and streaming never affect it.
+An explicit `task_complete` with a valid timestamp advances the last result time;
+subsequent lifecycle events retain it. Known completion times are merged into
+`globalState` (`codexExtras.lastResultTimes`) so a reload or a new turn cannot
+lose a previously observed result outside the bounded log tail. Old completion
+records outside that tail cannot be recovered on first observation; such chats
+remain below dated results until a completion time becomes known. Equal or
+missing timestamps use stable session IDs, not mutable names or index dates.
+The old local `activeFirst` setting is accepted as an alias for `latestResult`.
+Previous opening-history data is ignored. Result sorting enables log watchers,
+but only visible status icons require the live IPC observer.
 
 ## Sources of status
 
